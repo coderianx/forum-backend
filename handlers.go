@@ -150,7 +150,7 @@ func register(w http.ResponseWriter, r *http.Request) {
 		VALUES ($1, $2, $3)
 		`,
 		id,
-		codeHash,
+		hex.EncodeToString(codeHash),
 		time.Now().Add(15*time.Minute),
 	)
 
