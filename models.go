@@ -40,6 +40,7 @@ type RefreshRequest struct {
 type Post struct {
 	ID        int       `json:"id"`
 	UserID    int       `json:"user_id"`
+	Username  string    `json:"username"`
 	Title     string    `json:"title"`
 	Content   string    `json:"content"`
 	CreatedAt time.Time `json:"created_at"`
@@ -48,4 +49,17 @@ type Post struct {
 type CreatePostRequest struct {
 	Title   string `json:"title" binding:"required"`
 	Content string `json:"content" binding:"required"`
+}
+
+type CreateComment struct {
+	PostID  int    `json:"post_id" binding:"required"`
+	Content string `json:"content" binding:"required"`
+}
+
+type Comments struct {
+	ID        int       `json:"id"`
+	UserID    int       `json:"user_id"`
+	Username  string    `json:"username"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
 }

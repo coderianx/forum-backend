@@ -2,10 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -61,4 +65,116 @@ func authMiddleware(next http.Handler) http.Handler {
 		// Yeni context'e sahip request'i sonraki handler'a gönder
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func RateLimitByIP(
+	maxRequests int64,
+	duration time.Duration,
+) func(http.Handler) http.Handler {
+
+	return func(next http.Handler) http.Handler {
+
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+
+			// IP adresini porttan ayır
+			ip, _, err := net.SplitHostPort(r.RemoteAddr)
+
+			if err != nil {
+				// Eğer RemoteAddr port içermiyorsa
+				ip = r.RemoteAddr
+			}
+
+			key := "rate_limit:" + ip
+
+			// Redis'teki sayacı artır
+			count, err := redisClient.Incr(
+				r.Context(),
+				key,
+			).Result()
+
+			if err != nil {
+				w.Header().Set(
+					"Content-Type",
+					"application/json",
+				)
+
+				w.WriteHeader(
+					http.StatusInternalServerError,
+				)
+
+				json.NewEncoder(w).Encode(map[string]any{
+					"error": "Rate limit error",
+				})
+
+				return
+			}
+
+			// İlk istek ise expiration ayarla
+			if count == 1 {
+
+				err := redisClient.Expire(
+					r.Context(),
+					key,
+					duration,
+				).Err()
+
+				if err != nil {
+					w.Header().Set(
+						"Content-Type",
+						"application/json",
+					)
+
+					w.WriteHeader(
+						http.StatusInternalServerError,
+					)
+
+					json.NewEncoder(w).Encode(map[string]any{
+						"error": "Rate limit expiration error",
+					})
+
+					return
+				}
+			}
+
+			// Limit aşıldıysa
+			if count > maxRequests {
+
+				// Kaç saniye kaldığını Redis'ten al
+				ttl, err := redisClient.TTL(
+					r.Context(),
+					key,
+				).Result()
+
+				if err != nil {
+					ttl = duration
+				}
+
+				w.Header().Set(
+					"Retry-After",
+					strconv.FormatInt(
+						int64(ttl.Seconds()),
+						10,
+					),
+				)
+
+				w.Header().Set(
+					"Content-Type",
+					"application/json",
+				)
+
+				w.WriteHeader(
+					http.StatusTooManyRequests,
+				)
+
+				json.NewEncoder(w).Encode(map[string]any{
+					"error": "Too Many Requests",
+				})
+
+				return
+			}
+
+			// Limit aşılmadıysa devam et
+			next.ServeHTTP(w, r)
+		})
+	}
 }

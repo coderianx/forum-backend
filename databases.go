@@ -6,9 +6,21 @@ import (
 	"os"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/redis/go-redis/v9"
 )
 
 var db *pgx.Conn
+var redisClient = redis.NewClient(&redis.Options{
+	Addr:     "localhost:6379",
+	Password: "",
+	DB:       0,
+})
+
+func connectRedis() {
+	if err := redisClient.Ping(context.Background()).Err(); err != nil {
+		log.Fatal("redis bağlantı hatası: ", err.Error())
+	}
+}
 
 func connectPostresql() {
 	var err error
@@ -70,6 +82,7 @@ func createTables() {
 		CREATE TABLE IF NOT EXISTS posts(
 			id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
 			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			username TEXT NOT NULL,
 			title TEXT NOT NULL,
 			content TEXT NOT NULL,
 			created_at TIMESTAMP NOT NULL DEFAULT NOW()
@@ -94,4 +107,19 @@ func createTables() {
 	if err != nil {
 		panic(err)
 	}
+
+	_, err = db.Exec(
+		context.Background(),
+		`
+		CREATE TABLE IF NOT EXISTS comments (
+			id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+			post_id BIGINT NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			username TEXT NOT NULL,
+			content TEXT NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW()
+		);
+		`,
+	)
+
 }

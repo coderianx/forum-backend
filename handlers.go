@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -10,8 +9,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
@@ -235,7 +236,8 @@ func verify_email(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 
 		json.NewEncoder(w).Encode(map[string]any{
-			"error": "OTP not found",
+			"error":   "OTP not found",
+			"message": err.Error(),
 		})
 
 		return
@@ -305,7 +307,7 @@ func verify_email(w http.ResponseWriter, r *http.Request) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusTooManyRequests)
 
 		json.NewEncoder(w).Encode(map[string]any{
 			"error": "Trial limit exceeded, Request new OTP Code",
@@ -341,7 +343,7 @@ func verify_email(w http.ResponseWriter, r *http.Request) {
 	// OTP yanlış mı?
 	if userCodeHash != codeHash {
 		_, err = db.Exec(
-			context.Background(),
+			ctx,
 			`
 			UPDATE email_verifications
 			SET attempts = attempts + 1
@@ -362,7 +364,7 @@ func verify_email(w http.ResponseWriter, r *http.Request) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusBadRequest)
 
 		json.NewEncoder(w).Encode(map[string]any{
 			"error": "OTP code is wrong",
@@ -372,7 +374,7 @@ func verify_email(w http.ResponseWriter, r *http.Request) {
 
 	// Email'i doğrula
 	_, err = db.Exec(
-		context.Background(),
+		ctx,
 		`
 		UPDATE users
 		SET email_verified = TRUE
@@ -394,7 +396,7 @@ func verify_email(w http.ResponseWriter, r *http.Request) {
 
 	// OTP'yi sil
 	_, err = db.Exec(
-		context.Background(),
+		ctx,
 		`
 		DELETE FROM email_verifications
 		WHERE user_id = $1
@@ -429,7 +431,7 @@ func login(w http.ResponseWriter, r *http.Request) {
 
 	err := json.NewDecoder(r.Body).Decode(&user)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusBadRequest)
 
 		json.NewEncoder(w).Encode(map[string]any{
 			"error":   "Invalid JSON",
@@ -576,7 +578,7 @@ func login(w http.ResponseWriter, r *http.Request) {
 		ctx,
 		`
 		INSERT INTO refresh_tokens
-		(user_id,token,expires)
+		(user_id,token,expires_at)
 		VALUES($1, $2, $3)
 		`,
 		userID,
@@ -601,7 +603,7 @@ func login(w http.ResponseWriter, r *http.Request) {
 		"login":         true,
 		"username":      user.Username,
 		"access_token":  accessToken,
-		"refresh_token": refreshToken, // Only tests
+		"refresh_token": randomToken, // Only tests
 
 	})
 
@@ -636,7 +638,7 @@ func refresh(w http.ResponseWriter, r *http.Request) {
 	err = db.QueryRow(
 		ctx,
 		`
-		SELECT user_id,expires
+		SELECT user_id,expires_at
 		FROM refresh_tokens
 		WHERE token=$1
 		`,
@@ -649,7 +651,8 @@ func refresh(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		w.WriteHeader(401)
 		json.NewEncoder(w).Encode(map[string]any{
-			"error": "Refresh Token is invalid",
+			"error":   "Refresh Token is invalid",
+			"message": err.Error(),
 		})
 		return
 	}
@@ -759,7 +762,7 @@ func refresh(w http.ResponseWriter, r *http.Request) {
 		ctx,
 		`
 		INSERT INTO refresh_tokens
-		(user_id, token, expires)
+		(user_id, token, expires_at)
 		VALUES($1, $2, $3)
 		`,
 		userID,
@@ -790,7 +793,7 @@ func get_posts(w http.ResponseWriter, r *http.Request) {
 	rows, err := db.Query(
 		ctx,
 		`
-		SELECT id, user_id, title, content, created_at
+		SELECT id, user_id, username, title, content, created_at
 		FROM posts
 		ORDER BY id DESC
 		LIMIT 50
@@ -816,6 +819,7 @@ func get_posts(w http.ResponseWriter, r *http.Request) {
 		err := rows.Scan(
 			&post.ID,
 			&post.UserID,
+			&post.Username,
 			&post.Title,
 			&post.Content,
 			&post.CreatedAt,
@@ -832,6 +836,15 @@ func get_posts(w http.ResponseWriter, r *http.Request) {
 		}
 
 		posts = append(posts, post)
+	}
+
+	if err := rows.Err(); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error":   "Failed to iterate posts",
+			"message": err.Error(),
+		})
+		return
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -906,12 +919,13 @@ func create_post(w http.ResponseWriter, r *http.Request) {
 		ctx,
 		`
 		INSERT INTO posts(
-			user_id, title, content
+			user_id, username ,title, content
 		)
-		VALUES ($1, $2, $3)
+		VALUES ($1, $2, $3, $4)
 		RETURNING id
 		`,
 		userID,
+		username,
 		req.Title,
 		req.Content,
 	).Scan(&postID)
@@ -932,5 +946,257 @@ func create_post(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{
 		"message": "Post created",
 		"post_id": postID,
+	})
+}
+
+func get_user_posts(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	ctx := r.Context()
+	username := chi.URLParam(r, "username")
+
+	rows, err := db.Query(
+		ctx,
+		`
+		SELECT id, user_id, username ,title, content, created_at
+		FROM posts
+		WHERE username=$1
+		ORDER BY created_at DESC
+		`,
+		username,
+	)
+
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"error":   "Database error",
+			"message": err.Error(),
+		})
+
+		return
+	}
+
+	defer rows.Close()
+
+	posts := []Post{}
+
+	for rows.Next() {
+		var post Post
+
+		err := rows.Scan(
+			&post.ID,
+			&post.UserID,
+			&post.Username,
+			&post.Title,
+			&post.Content,
+			&post.CreatedAt,
+		)
+
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]any{
+				"error":   "Failed to scan post",
+				"message": err.Error(),
+			})
+
+			return
+		}
+
+		posts = append(posts, post)
+	}
+
+	if err := rows.Err(); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error":   "Failed to iterate posts",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"posts": posts,
+	})
+}
+
+func create_comment(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	ctx := r.Context()
+	var req CreateComment
+
+	err := json.NewDecoder(r.Body).Decode(&req)
+
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"error":   "Invalid JSON",
+			"message": err.Error(),
+		})
+
+		return
+	}
+
+	userID, exists := r.Context().Value(userIDKey).(int)
+
+	if !exists {
+		w.WriteHeader(http.StatusUnauthorized)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"error":   "user not login",
+			"message": "Please login first",
+		})
+
+		return
+	}
+
+	var username string
+
+	err = db.QueryRow(
+		ctx,
+		`
+		SELECT username
+		FROM posts
+		WHERE id=$1
+		`,
+		userID,
+	).Scan(&username)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		w.WriteHeader(http.StatusUnauthorized)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": "User not found",
+		})
+		return
+	}
+
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"error":   "Database error",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	err = db.QueryRow(
+		ctx,
+		`
+		SELECT EXISTS (
+			SELECT 1
+			FROM users
+			WHERE id = $1
+		)
+		`,
+		req.PostID,
+	).Scan(&exists)
+
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"error":   "Database error",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	if !exists {
+		w.WriteHeader(http.StatusNotFound)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": "Post not found",
+		})
+
+		return
+	}
+
+	_, err = db.Exec(
+		ctx,
+		`
+		INSERT INTO comments(
+			post_id, user_id, username, content	
+		)
+		VALUES ($1, $2, $3, $4)
+		`,
+		req.PostID,
+		userID,
+		username,
+		req.Content,
+	)
+}
+
+func get_post_comments(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	ctx := r.Context()
+	postID, err := strconv.Atoi(chi.URLParam(r, "post_id"))
+
+	rows, err := db.Query(
+		ctx,
+		`
+		SELECT id, user_id, username, content, created_at
+		FROM comments
+		WHERE post_id=$1
+		ORDER BY created_at DESC
+		`,
+		postID,
+	)
+
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"error":   "Database error",
+			"message": err.Error(),
+		})
+
+		return
+	}
+
+	defer rows.Close()
+
+	comments := []Comments{}
+
+	for rows.Next() {
+		var comment Comments
+
+		err := rows.Scan(
+			&comment.ID,
+			&comment.UserID,
+			&comment.Username,
+			&comment.Content,
+			&comment.CreatedAt,
+		)
+
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]any{
+				"error":   "Failed to scan post",
+				"message": err.Error(),
+			})
+
+			return
+		}
+
+		comments = append(comments, comment)
+	}
+
+	if err := rows.Err(); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error":   "Failed to iterate comments",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"comments": comments,
 	})
 }
