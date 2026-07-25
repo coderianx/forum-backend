@@ -31,6 +31,9 @@ func main() {
 			auth.With(RateLimitByIP(3, time.Minute)).Post(
 				"/register", register,
 			)
+			auth.With(RateLimitByIP(5, time.Minute)).Post(
+				"/login", login
+			)
 			auth.With(RateLimitByIP(3, time.Minute)).Post(
 				"/verify-email", verify_email,
 			)
@@ -47,6 +50,10 @@ func main() {
 			"/comment", create_comment,
 		)
 		api.Get("/post/{post_id}/comments", get_post_comments)
+
+		api.With(RateLimitByIP(10, time.Minute)).Get(
+			"/posts/search", searchHandler,
+		)
 	})
 
 	http.ListenAndServe(":8080", r)
