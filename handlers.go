@@ -1152,7 +1152,6 @@ func get_post_comments(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	postID, err := strconv.Atoi(chi.URLParam(r, "post_id"))
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]any{
 			"error": "Invalid post ID",
@@ -1306,5 +1305,197 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 
 	json.NewEncoder(w).Encode(map[string]any{
 		"posts": posts,
+	})
+}
+
+func like_post(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	ctx := r.Context()
+
+	postID, err := strconv.Atoi(chi.URLParam(r, "post_id"))
+	userID, exists := r.Context().Value(userIDKey).(int)
+
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": "Invalid post id",
+		})
+
+		return
+	}
+
+	if !exists {
+		w.WriteHeader(http.StatusUnauthorized)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"error":   "user not login",
+			"message": "Please login first",
+		})
+
+		return
+	}
+
+	var postExists bool
+
+	err = db.QueryRow(
+		ctx,
+		`
+		SELECT EXISTS (
+			SELECT 1
+			FROM posts
+			WHERE id = $1
+		)
+		`,
+		postID,
+	).Scan(&postExists)
+
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"error":   "Database error",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	if !postExists {
+		w.WriteHeader(http.StatusNotFound)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": "Post not found",
+		})
+
+		return
+	}
+
+	var username string
+
+	err = db.QueryRow(
+		ctx,
+		`
+		SELECT username
+		FROM users
+		WHERE id=$1
+		`,
+		postID,
+	).Scan(&username)
+
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"error":   "Database error",
+			"message": err.Error(),
+		})
+
+		return
+	}
+
+	_, err = db.Exec(
+		ctx,
+		`
+		INSERT INTO likes (post_id, user_id, username)
+		VALUES ($1, $2)
+		`,
+		postID,
+		userID,
+		username,
+	)
+
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"error":   "Database error",
+			"message": err.Error(),
+		})
+
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]any{
+		"message": "Likes succesful",
+	})
+}
+
+func get_post_likes(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	ctx := r.Context()
+	postID, err := strconv.Atoi(chi.URLParam(r, "post_id"))
+
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": "Invalid post id",
+		})
+
+		return
+	}
+
+	rows, err := db.Query(
+		ctx,
+		`
+		SELECT id, post_id, user_id, username ,created_at
+		FROM likes
+		WHERE post_id=$1
+		`,
+		postID,
+	)
+
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"error":   "Database error",
+			"message": err.Error(),
+		})
+
+		return
+	}
+
+	defer rows.Close()
+
+	likes := []Likes{}
+
+	for rows.Next() {
+		var like Likes
+
+		err := rows.Scan(
+			&like.ID,
+			&like.PostID,
+			&like.UserID,
+			&like.Username,
+			&like.CreatedAt,
+		)
+
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]any{
+				"error":   "Failed to scan likes",
+				"message": err.Error(),
+			})
+
+			return
+		}
+		likes = append(likes, like)
+	}
+
+	if err := rows.Err(); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error":   "Failed to iterate comments",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"likes": likes,
 	})
 }

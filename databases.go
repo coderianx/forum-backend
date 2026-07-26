@@ -118,8 +118,30 @@ func createTables() {
 			username TEXT NOT NULL,
 			content TEXT NOT NULL,
 			created_at TIMESTAMP NOT NULL DEFAULT NOW()
+		)
+		`,
+	)
+
+	if err != nil {
+		panic(err)
+	}
+
+	_, err = db.Exec(
+		context.Background(),
+		`
+		CREATE TABLE IF NOT EXISTS likes (
+			id BIGSERIAL PRIMARY KEY,
+			post_id BIGINT NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			username TEXT NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			UNIQUE (post_id, user_id)
 		);
 		`,
 	)
+
+	if err != nil {
+		panic(err)
+	}
 
 }

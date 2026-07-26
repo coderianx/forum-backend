@@ -32,7 +32,7 @@ func main() {
 				"/register", register,
 			)
 			auth.With(RateLimitByIP(5, time.Minute)).Post(
-				"/login", login
+				"/login", login,
 			)
 			auth.With(RateLimitByIP(3, time.Minute)).Post(
 				"/verify-email", verify_email,
@@ -53,6 +53,12 @@ func main() {
 
 		api.With(RateLimitByIP(10, time.Minute)).Get(
 			"/posts/search", searchHandler,
+		)
+		api.With(authMiddleware, RateLimitByIP(5, time.Minute)).Post(
+			"/post/{post_id}/like", like_post,
+		)
+		api.With(RateLimitByIP(10, time.Minute)).Get(
+			"/post/{post_id}/like", get_post_likes,
 		)
 	})
 
