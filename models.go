@@ -71,3 +71,18 @@ type Likes struct {
 	Username  string    `json:"username"`
 	CreatedAt time.Time `json:"created_at"`
 }
+
+type ResetPassword struct {
+	OldPassword string `json:"old_password"`
+	NewPassword string `json:"new_password"`
+}
+
+type ForgetPassword struct {
+	Email string `json:"email" binding:"required"`
+}
+
+type ConfirmForgotPassword struct {
+	Email       string `json:"email" binding:"required"`
+	Code        string `json:"code" binding:"required"`
+	NewPassword string `json:"new_password" binding:"required"`
+}

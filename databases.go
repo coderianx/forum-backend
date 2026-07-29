@@ -136,8 +136,26 @@ func createTables() {
 			username TEXT NOT NULL,
 			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
 			UNIQUE (post_id, user_id)
-		);
+		)
 		`,
+	)
+
+	if err != nil {
+		panic(err)
+	}
+
+	_, err = db.Exec(
+		context.Background(),
+		`
+		DROP TABLE IF EXISTS "forget-password";
+
+		CREATE TABLE IF NOT EXISTS password_resets (
+			id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+			user_id BIGINT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+			code_hash TEXT NOT NULL,
+			expires_at TIMESTAMP NOT NULL,
+			attempts INTEGER NOT NULL DEFAULT 0
+		)`,
 	)
 
 	if err != nil {

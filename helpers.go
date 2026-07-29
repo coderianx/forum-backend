@@ -2,14 +2,51 @@ package main
 
 import (
 	"bytes"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"html/template"
 	"math/big"
+	"net/http"
 	"net/smtp"
 	"os"
+	"time"
+	"unicode/utf8"
 )
+
+const (
+	otpExpiry      = 15 * time.Minute
+	otpMaxAttempts = 5
+	minPasswordLen = 8
+)
+
+func respondJSON(w http.ResponseWriter, status int, data map[string]any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(data)
+}
+
+func hashOTP(code string) (string, error) {
+	secret := os.Getenv("OTP_SECRET")
+	if secret == "" {
+		return "", errors.New("OTP_SECRET missing")
+	}
+
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(code))
+
+	return hex.EncodeToString(mac.Sum(nil)), nil
+}
+
+func validatePassword(password string) error {
+	if utf8.RuneCountInString(password) < minPasswordLen {
+		return errors.New("password must be at least 8 characters")
+	}
+	return nil
+}
 
 func GenerateOTPCode() (string, error) {
 	code := ""
@@ -34,8 +71,10 @@ func sendEmail(
 	to string,
 	username string,
 	code string,
+	tmpl_file string,
+	subject string,
 ) error {
-	tmpl, err := template.ParseFiles("template/email.html")
+	tmpl, err := template.ParseFiles(tmpl_file)
 
 	if err != nil {
 		return err
@@ -69,7 +108,7 @@ func sendEmail(
 	)
 
 	message := []byte(
-		"Subject: Hoşgeldin!\r\n" +
+		"Subject: " + subject + "\r\n" +
 			"Content-Type: text/html; charset=UTF-8\r\n" +
 			"\r\n" +
 			body.String(),

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -185,6 +186,8 @@ func register(w http.ResponseWriter, r *http.Request) {
 			user.Email,
 			user.Username,
 			code,
+			"template/email.html",
+			"Hoşgeldin!",
 		)
 
 		if err != nil {
@@ -1498,4 +1501,404 @@ func get_post_likes(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{
 		"likes": likes,
 	})
+}
+
+func get_user_profile(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	ctx := r.Context()
+	userID := chi.URLParam(r, "user_id")
+	if userID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": "Invalid user id",
+		})
+		return
+	}
+
+	userIDInt, err := strconv.Atoi(userID)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": "Invalid user id",
+		})
+		return
+	}
+
+	// Variables
+	var username string
+	var email string
+	var createdAt time.Time
+
+	err = db.QueryRow(
+		ctx,
+		`
+		SELECT username, email, created_at
+		FROM users
+		WHERE id=$1
+		`,
+		userIDInt,
+	).Scan(&username, &email, &createdAt)
+
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error":   "Database error",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]any{
+		"username":   username,
+		"email":      email,
+		"created_at": createdAt,
+	})
+}
+
+// get_me returns the profile of the currently authenticated user.
+// It retrieves the user ID from the request context and queries the database for the user's information.
+func get_me(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	ctx := r.Context()
+	// Get user ID from context
+	userID, exists := r.Context().Value(userIDKey).(int)
+
+	if !exists {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": "Unauthorized",
+		})
+		return
+	}
+
+	var username string
+	var email string
+	var createdAt time.Time
+
+	err := db.QueryRow(
+		ctx,
+		`
+		SELECT username, email, created_at
+		FROM users
+		WHERE id=$1
+		`,
+		userID,
+	).Scan(&username, &email, &createdAt)
+
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error":   "Database error",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]any{
+		"user_id":    userID,
+		"username":   username,
+		"email":      email,
+		"created_at": createdAt,
+	})
+}
+
+// change_password lets a logged-in user update their password.
+func reset_password(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	userID, ok := ctx.Value(userIDKey).(int)
+	if !ok {
+		respondJSON(w, http.StatusUnauthorized, map[string]any{
+			"error": "Unauthorized",
+		})
+		return
+	}
+
+	var req ResetPassword
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondJSON(w, http.StatusBadRequest, map[string]any{
+			"error": "Invalid JSON",
+		})
+		return
+	}
+
+	if err := validatePassword(req.NewPassword); err != nil {
+		respondJSON(w, http.StatusBadRequest, map[string]any{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	var hashedPassword string
+	err := db.QueryRow(
+		ctx,
+		`SELECT password FROM users WHERE id = $1`,
+		userID,
+	).Scan(&hashedPassword)
+
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": "Database error",
+		})
+		return
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(req.OldPassword)); err != nil {
+		respondJSON(w, http.StatusUnauthorized, map[string]any{
+			"error": "Old password is incorrect",
+		})
+		return
+	}
+
+	newHashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": "Failed to hash new password",
+		})
+		return
+	}
+
+	if err := updatePasswordAndLogoutAll(ctx, userID, newHashedPassword); err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]any{
+		"message": "Password updated successfully",
+	})
+}
+
+// forget_password sends a one-time code to the user's email.
+// Always returns the same response to prevent email enumeration.
+func forget_password(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	var req ForgetPassword
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondJSON(w, http.StatusBadRequest, map[string]any{
+			"error": "Invalid JSON",
+		})
+		return
+	}
+
+	const successMsg = "If this email is registered, a reset code has been sent"
+
+	var userID int
+	var username string
+
+	err := db.QueryRow(
+		ctx,
+		`SELECT id, username FROM users WHERE email = $1`,
+		req.Email,
+	).Scan(&userID, &username)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		respondJSON(w, http.StatusOK, map[string]any{"message": successMsg})
+		return
+	}
+
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": "Database error",
+		})
+		return
+	}
+
+	code, err := GenerateOTPCode()
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": "Failed to generate reset code",
+		})
+		return
+	}
+
+	codeHash, err := hashOTP(code)
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": "Failed to process reset code",
+		})
+		return
+	}
+
+	_, err = db.Exec(
+		ctx,
+		`
+		INSERT INTO password_resets (user_id, code_hash, expires_at, attempts)
+		VALUES ($1, $2, $3, 0)
+		ON CONFLICT (user_id) DO UPDATE SET
+			code_hash = EXCLUDED.code_hash,
+			expires_at = EXCLUDED.expires_at,
+			attempts = 0
+		`,
+		userID,
+		codeHash,
+		time.Now().Add(otpExpiry),
+	)
+
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": "Failed to save reset code",
+		})
+		return
+	}
+
+	go func() {
+		if err := sendEmail(
+			req.Email,
+			username,
+			code,
+			"template/forgot-password.html",
+			"Şifre Sıfırlama",
+		); err != nil {
+			log.Println("password reset email failed:", err)
+		}
+	}()
+
+	respondJSON(w, http.StatusOK, map[string]any{"message": successMsg})
+}
+
+// confirm_forgot_password verifies the reset code and sets a new password.
+func confirm_forgot_password(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	var req ConfirmForgotPassword
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondJSON(w, http.StatusBadRequest, map[string]any{
+			"error": "Invalid JSON",
+		})
+		return
+	}
+
+	if err := validatePassword(req.NewPassword); err != nil {
+		respondJSON(w, http.StatusBadRequest, map[string]any{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	var userID int
+	err := db.QueryRow(
+		ctx,
+		`SELECT id FROM users WHERE email = $1`,
+		req.Email,
+	).Scan(&userID)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		respondJSON(w, http.StatusBadRequest, map[string]any{
+			"error": "Invalid reset code",
+		})
+		return
+	}
+
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": "Database error",
+		})
+		return
+	}
+
+	var (
+		codeHash  string
+		expiresAt time.Time
+		attempts  int
+	)
+
+	err = db.QueryRow(
+		ctx,
+		`SELECT code_hash, expires_at, attempts FROM password_resets WHERE user_id = $1`,
+		userID,
+	).Scan(&codeHash, &expiresAt, &attempts)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		respondJSON(w, http.StatusBadRequest, map[string]any{
+			"error": "Invalid reset code",
+		})
+		return
+	}
+
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": "Database error",
+		})
+		return
+	}
+
+	if time.Now().After(expiresAt) {
+		deletePasswordReset(ctx, userID)
+		respondJSON(w, http.StatusBadRequest, map[string]any{
+			"error": "Reset code has expired",
+		})
+		return
+	}
+
+	if attempts >= otpMaxAttempts {
+		deletePasswordReset(ctx, userID)
+		respondJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error": "Too many attempts, request a new reset code",
+		})
+		return
+	}
+
+	userCodeHash, err := hashOTP(req.Code)
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": "Failed to verify reset code",
+		})
+		return
+	}
+
+	if userCodeHash != codeHash {
+		incrementPasswordResetAttempts(ctx, userID)
+		respondJSON(w, http.StatusBadRequest, map[string]any{
+			"error": "Invalid reset code",
+		})
+		return
+	}
+
+	newHashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": "Failed to hash new password",
+		})
+		return
+	}
+
+	if err := updatePasswordAndLogoutAll(ctx, userID, newHashedPassword); err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	deletePasswordReset(ctx, userID)
+
+	respondJSON(w, http.StatusOK, map[string]any{
+		"message": "Password reset successfully",
+	})
+}
+
+func updatePasswordAndLogoutAll(ctx context.Context, userID int, hashedPassword []byte) error {
+	_, err := db.Exec(ctx, `UPDATE users SET password = $1 WHERE id = $2`, hashedPassword, userID)
+	if err != nil {
+		return errors.New("failed to update password")
+	}
+
+	_, err = db.Exec(ctx, `DELETE FROM refresh_tokens WHERE user_id = $1`, userID)
+	if err != nil {
+		return errors.New("failed to invalidate sessions")
+	}
+
+	return nil
+}
+
+func deletePasswordReset(ctx context.Context, userID int) {
+	db.Exec(ctx, `DELETE FROM password_resets WHERE user_id = $1`, userID)
+}
+
+func incrementPasswordResetAttempts(ctx context.Context, userID int) {
+	db.Exec(ctx, `UPDATE password_resets SET attempts = attempts + 1 WHERE user_id = $1`, userID)
 }
