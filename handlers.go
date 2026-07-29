@@ -1424,6 +1424,62 @@ func like_post(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func delete_post_like(w http.ResponseWriter, r *http.Request) {
+	// Set the response content type to JSON
+	w.Header().Set("Content-Type", "application/json")
+
+	ctx := r.Context()
+	postID, err := strconv.Atoi(chi.URLParam(r, "post_id"))
+	userID, ok := r.Context().Value(userIDKey).(int)
+
+	if !ok {
+		w.WriteHeader(http.StatusUnauthorized)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": "User unauthorized",
+		})
+		return
+	}
+
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": "Invalid post id",
+		})
+
+		return
+	}
+
+	result, err := db.Exec(
+		ctx,
+		`
+		DELETE FROM likes
+		WHERE post_id=$1 AND user_id=$2
+		`,
+		postID,
+		userID,
+	)
+
+	rowsAffected := result.RowsAffected()
+
+	if rowsAffected == 0 {
+		w.WriteHeader(http.StatusNotFound)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": "User has not liked this post yet",
+		})
+
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"message": "Success",
+	})
+}
+
 func get_post_likes(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	ctx := r.Context()

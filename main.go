@@ -84,6 +84,10 @@ func main() {
 		api.With(authMiddleware, RateLimitByIP(5, time.Minute)).Post(
 			"/post/{post_id}/like", like_post,
 		)
+		// Delete post like (Auth required)
+		api.With(authMiddleware, RateLimitByIP(5, time.Minute)).Delete(
+			"/post/{post_id}/like", delete_post_like,
+		)
 		// Get post likes (No auth required)
 		api.With(RateLimitByIP(10, time.Minute)).Get(
 			"/post/{post_id}/like", get_post_likes,
